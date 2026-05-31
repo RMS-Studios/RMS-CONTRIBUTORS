@@ -1,0 +1,109 @@
+name: Validate PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          path: pr
+
+      - name: Validate constants.ts - additions only
+        run: |
+          BASE=base/src/utils/constants.ts
+          PR=pr/src/utils/constants.ts
+
+          if [ ! -f "$BASE" ] || [ ! -f "$PR" ]; then
+            echo "constants.ts not found in one of the branches"
+            exit 1
+          fi
+
+          # Get all lines in base that are dev entries (name/id lines)
+          BASE_ENTRIES=$(grep -E '^\s+(name:|id:)' "$BASE")
+          PR_ENTRIES=$(grep -E '^\s+(name:|id:)' "$PR")
+
+          # Check that every line in base still exists in PR (no deletions/edits)
+          while IFS= read -r line; do
+            if ! grep -qF "$line" "$PR"; then
+              echo "❌ ERROR: Existing entry was modified or deleted in constants.ts:"
+              echo "   Missing: $line"
+              echo ""
+              echo "You may only ADD new entries to constants.ts, not edit or remove existing ones."
+              exit 1
+            fi
+          done <<< "$BASE_ENTRIES"
+
+          echo "✅ constants.ts check passed - no existing entries were modified or deleted"
+
+      - name: Validate plugins - additions only
+        run: |
+          BASE_PLUGINS=$(find base/src/plugins -type f | sed 's|base/||' | sort)
+          PR_PLUGINS=$(find pr/src/plugins -type f | sed 's|pr/||' | sort)
+
+          # Check for deleted or modified plugin files
+          FAILED=0
+          while IFS= read -r file; do
+            BASE_FILE="base/$file"
+            PR_FILE="pr/$file"
+
+            # File was deleted
+            if [ ! -f "$PR_FILE" ]; then
+              echo "❌ ERROR: Existing plugin file was deleted: $file"
+              FAILED=1
+              continue
+            fi
+
+            # File was modified
+            if ! diff -q "$BASE_FILE" "$PR_FILE" > /dev/null 2>&1; then
+              echo "❌ ERROR: Existing plugin file was modified: $file"
+              echo "   You may only add new plugin files, not edit existing ones."
+              FAILED=1
+            fi
+          done <<< "$BASE_PLUGINS"
+
+          if [ $FAILED -ne 0 ]; then
+            exit 1
+          fi
+
+          # Show what new plugins are being added
+          NEW_PLUGINS=$(comm -13 <(echo "$BASE_PLUGINS") <(echo "$PR_PLUGINS"))
+          if [ -n "$NEW_PLUGINS" ]; then
+            echo "✅ New plugins being added:"
+            echo "$NEW_PLUGINS"
+          fi
+
+          echo "✅ Plugin check passed - no existing plugins were modified or deleted"
+
+      - name: Check PR only touches allowed files
+        run: |
+          cd pr
+          git fetch origin ${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          FAILED=0
+          while IFS= read -r file; do
+            # Allow constants.ts and files in src/plugins/
+            if [[ "$file" != "src/utils/constants.ts" && "$file" != src/plugins/* ]]; then
+              echo "❌ ERROR: PR touches a file outside of allowed paths: $file"
+              echo "   PRs may only modify src/utils/constants.ts and add files to src/plugins/"
+              FAILED=1
+            fi
+          done <<< "$CHANGED"
+
+          if [ $FAILED -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "✅ All changed files are in allowed paths"
