@@ -1,0 +1,56 @@
+name: Sync to RMS
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  sync:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout contributors repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout private RMS repo
+        uses: actions/checkout@v4
+        with:
+          repository: zxkuhl/RMS-dev
+          token: ${{ secrets.RMS_PAT }}
+          path: rms-private
+
+      - name: Copy new plugin files to RMS repo
+        run: |
+          # Get list of files added in this PR
+          ADDED_FILES=$(git diff --name-only --diff-filter=A HEAD~1 HEAD)
+
+          echo "Files added in this PR:"
+          echo "$ADDED_FILES"
+
+          # Copy each added file to the private repo
+          while IFS= read -r file; do
+            if [[ "$file" == src/plugins/* ]] || [[ "$file" == "src/utils/constants.ts" ]]; then
+              DEST="rms-private/$file"
+              mkdir -p "$(dirname "$DEST")"
+              cp "$file" "$DEST"
+              echo "Copied: $file"
+            fi
+          done <<< "$ADDED_FILES"
+
+      - name: Commit and push to RMS repo
+        run: |
+          cd rms-private
+          git config user.name "RMS Contributors Bot"
+          git config user.email "bot@rms.dev"
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            PR_TITLE="${{ github.event.pull_request.title }}"
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            git commit -m "feat: add plugin from contributor $PR_AUTHOR - $PR_TITLE"
+            git push
+          fi
